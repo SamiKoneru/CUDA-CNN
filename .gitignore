@@ -1,0 +1,34 @@
+# Compiled binary
+cnn
+
+# Build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# MNIST data files
+*-idx*-ubyte
+*-idx*-ubyte.gz
+*.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Profiling output
+*.nsys-rep
+*.qdrep
+*.nvprof
+report.*
+
+# Notebook artifacts (in case you experiment in Colab)
+.ipynb_checkpoints/
