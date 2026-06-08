@@ -91,7 +91,7 @@ int main() {
     net.add(LayerKind::Softmax, &softmax);
 
     int batch_size = 64;
-    int epochs     = 5;
+    int epochs     = 20;
 
     printf("\ntraining: %d epochs, batch=%d, lr=%.4f\n", epochs, batch_size, lr);
     net.train(train_x, train_y_dev, batch_size, epochs);
