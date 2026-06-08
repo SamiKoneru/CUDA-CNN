@@ -55,6 +55,7 @@ public:
         }
     }
 
+    Pool_Layer() = default;
     Pool_Layer(const Pool_Layer&) = delete;
     Pool_Layer& operator=(const Pool_Layer&) = delete;
 
