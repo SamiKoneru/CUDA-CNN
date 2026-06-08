@@ -24,7 +24,6 @@ End-to-end MNIST pipeline is wired: tensor ops, GEMM, Adam, all layers, network 
 ### Known limitations
 
 - No CUDA error checks anywhere — failed kernel launches are silent and surface as NaN loss
-- Dataset is not shuffled between epochs
 - Dense and Conv backward `cudaMalloc`/`cudaFree` scratch buffers every step (Wt, xT/patchesT, dW, dB) — wasteful but not a correctness bug
 - Pool layer assumes the input dims are exactly divisible by stride; no padding handling
 - Softmax assumes `(N, 1, 1, C)` layout and uses one block per sample with `C` threads — breaks for `C > 1024`

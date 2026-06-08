@@ -2,6 +2,9 @@
 #include <vector>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
+#include <numeric>
+#include <random>
 #include "tensor.cuh"
 #include "layer.cuh"
 
@@ -61,6 +64,31 @@ __global__ void net_argmax_hit_kernel(
     if (bi == labels[n]) atomicAdd(out_hits, 1);
 }
 
+// Gather a contiguous batch from the full dataset using a permutation.
+// One thread per output element of x_batch.
+__global__ void net_gather_x_kernel(
+    const float* x_full, float* x_batch,
+    const int* perm, int start,
+    int batch_size, int sample_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch_size * sample_size;
+    if (i >= total) return;
+    int local = i / sample_size;
+    int j     = i % sample_size;
+    int src   = perm[start + local];
+    x_batch[i] = x_full[(size_t)src * sample_size + j];
+}
+
+__global__ void net_gather_y_kernel(
+    const int* y_full, int* y_batch,
+    const int* perm, int start, int batch_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= batch_size) return;
+    y_batch[i] = y_full[perm[start + i]];
+}
+
 static inline int net_blocks_for(int n, int threads) { return (n - 1) / threads + 1; }
 
 // ----------------------------------------------------------------
@@ -91,6 +119,9 @@ public:
     // Device scratch for per-batch loss/accuracy reductions.
     float* d_loss_sum  = nullptr;
     int*   d_hit_count = nullptr;
+
+    // RNG for per-epoch data shuffling. Fixed seed so runs are reproducible.
+    std::mt19937 rng{0};
 
     Network() = default;
     Network(const Network&) = delete;
@@ -261,36 +292,50 @@ void Network::compute_metrics_(const int* d_labels, int batch_size, int C,
 }
 
 void Network::epoch(const Tensor& x_full, const int* d_y_full, int batch_size) {
-    int total      = x_full.N;
-    int per_sample = x_full.H * x_full.W * x_full.C;
-    int L          = (int)layers.size();
+    int total  = x_full.N;
+    int sample = x_full.H * x_full.W * x_full.C;
+    int L      = (int)layers.size();
+
+    // Per-epoch index permutation. Upload once, reuse across batches.
+    std::vector<int> perm(total);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+
+    int* d_perm = nullptr;
+    cudaMalloc(&d_perm, (size_t)total * sizeof(int));
+    cudaMemcpy(d_perm, perm.data(),
+               (size_t)total * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Scratch buffers gathered into each batch.
+    Tensor x_batch_buf = tensor_alloc(batch_size, x_full.H, x_full.W, x_full.C);
+    int*   y_batch_buf = nullptr;
+    cudaMalloc(&y_batch_buf, (size_t)batch_size * sizeof(int));
 
     float sum_loss = 0.0f, sum_acc = 0.0f;
     int   nb       = 0;
+    int   threads  = 256;
 
     for (int start = 0; start + batch_size <= total; start += batch_size) {
-        Tensor x_batch = {
-            x_full.data + (size_t)start * per_sample,
-            batch_size, x_full.H, x_full.W, x_full.C
-        };
-        const int* y_batch = d_y_full + start;
+        int gx_total = batch_size * sample;
+        net_gather_x_kernel<<<net_blocks_for(gx_total, threads), threads>>>(
+            x_full.data, x_batch_buf.data, d_perm, start, batch_size, sample);
+        net_gather_y_kernel<<<net_blocks_for(batch_size, threads), threads>>>(
+            d_y_full, y_batch_buf, d_perm, start, batch_size);
 
         Tensor dummy;
-        forward(x_batch, dummy);
+        forward(x_batch_buf, dummy);
 
         const Tensor& probs = acts[L];
         int C = probs.C;
 
         float l, a;
-        compute_metrics_(y_batch, batch_size, C, &l, &a);
+        compute_metrics_(y_batch_buf, batch_size, C, &l, &a);
         sum_loss += l;
         sum_acc  += a;
         nb++;
 
-        // Fused softmax+xent gradient → start backward at layer L-2 (skip softmax).
-        int threads = 256;
         net_softmax_xent_grad_kernel<<<net_blocks_for(batch_size * C, threads), threads>>>(
-            probs.data, y_batch, fused_grad.data, batch_size, C);
+            probs.data, y_batch_buf, fused_grad.data, batch_size, C);
 
         backward_from_(L - 2, fused_grad);
     }
@@ -299,6 +344,10 @@ void Network::epoch(const Tensor& x_full, const int* d_y_full, int batch_size) {
         printf("  loss=%.4f  acc=%.4f  (%d batches)\n",
                sum_loss / nb, sum_acc / nb, nb);
     }
+
+    cudaFree(d_perm);
+    cudaFree(y_batch_buf);
+    tensor_free(x_batch_buf);
 }
 
 void Network::train(const Tensor& x_full, const int* d_y_full, int batch_size, int epochs) {
